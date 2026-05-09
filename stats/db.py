@@ -297,13 +297,198 @@ def get_duel(duel_id: str) -> dict | None:
         return _attach_rounds(conn, row) if row else None
 
 
-def get_duels(limit: int = 50, offset: int = 0) -> list[dict]:
+def get_duels(
+    limit: int = 50,
+    offset: int = 0,
+    i_won: bool | None = None,
+    include_rounds: bool = True,
+) -> list[dict]:
+    sql = "SELECT * FROM duels"
+    params: list = []
+    if i_won is not None:
+        sql += " WHERE i_won = ?"
+        params.append(int(bool(i_won)))
+    sql += " ORDER BY time DESC LIMIT ? OFFSET ?;"
+    params.extend([limit, offset])
+
     with get_connection() as conn:
-        rows = conn.execute(
-            "SELECT * FROM duels ORDER BY time DESC LIMIT ? OFFSET ?;",
-            (limit, offset),
-        ).fetchall()
-        return [_attach_rounds(conn, r) for r in rows]
+        rows = conn.execute(sql, tuple(params)).fetchall()
+        if include_rounds:
+            return [_attach_rounds(conn, r) for r in rows]
+        return [dict(r) for r in rows]
+
+
+# ---------- counts (for paginated list metadata) ----------
+
+def count_account_snapshots() -> int:
+    with get_connection() as conn:
+        return conn.execute("SELECT COUNT(*) FROM account_snapshots;").fetchone()[0]
+
+
+def count_ratings(type: str | None = None) -> int:
+    with get_connection() as conn:
+        if type is None:
+            return conn.execute("SELECT COUNT(*) FROM duels_ranking_poll;").fetchone()[0]
+        return conn.execute(
+            "SELECT COUNT(*) FROM duels_ranking_poll WHERE type = ?;", (type,)
+        ).fetchone()[0]
+
+
+def count_singleplayer_games() -> int:
+    with get_connection() as conn:
+        return conn.execute("SELECT COUNT(*) FROM singleplayer_games;").fetchone()[0]
+
+
+def count_duels(i_won: bool | None = None) -> int:
+    with get_connection() as conn:
+        if i_won is None:
+            return conn.execute("SELECT COUNT(*) FROM duels;").fetchone()[0]
+        return conn.execute(
+            "SELECT COUNT(*) FROM duels WHERE i_won = ?;", (int(bool(i_won)),)
+        ).fetchone()[0]
+
+
+# ---------- chart aggregations ----------
+#
+# bucket=raw  → one point per row with a rolling moving avg over the last
+#               `window` rows (window functions on the natural sort column).
+# bucket=hour|day|week|month → group by time bucket, then a rolling avg
+#               over the last `window` buckets.
+#
+# Window-frame bounds (`ROWS BETWEEN N PRECEDING…`) cannot be parameterized
+# in SQLite, so `window` is coerced to an int and inlined.
+
+_BUCKET_FORMATS = {
+    "hour":  "%Y-%m-%dT%H:00:00",
+    "day":   "%Y-%m-%d",
+    "week":  "%Y-W%W",
+    "month": "%Y-%m",
+}
+
+
+def _validate_bucket(bucket: str) -> str:
+    if bucket != "raw" and bucket not in _BUCKET_FORMATS:
+        raise ValueError(f"invalid bucket: {bucket}")
+    return bucket
+
+
+def _validate_window(window: int) -> int:
+    w = int(window)
+    if w < 1:
+        raise ValueError("window must be >= 1")
+    return w
+
+
+def _timeseries(
+    *,
+    table: str,
+    value_expr: str,
+    time_col: str,
+    sort_col: str,
+    where_sql: str = "",
+    where_params: tuple = (),
+    bucket: str,
+    window: int,
+    bucket_agg: str = "AVG",
+) -> list[dict]:
+    bucket = _validate_bucket(bucket)
+    w = _validate_window(window) - 1  # frame is N-1 PRECEDING + current row
+
+    where_clause = f"WHERE {where_sql}" if where_sql else ""
+
+    if bucket == "raw":
+        sql = f"""
+            SELECT {time_col} AS bucket,
+                   {value_expr} AS value,
+                   1 AS n,
+                   AVG({value_expr}) OVER (
+                       ORDER BY {sort_col}
+                       ROWS BETWEEN {w} PRECEDING AND CURRENT ROW
+                   ) AS moving_avg
+            FROM {table}
+            {where_clause}
+            ORDER BY {sort_col};
+        """
+        params = where_params
+    else:
+        fmt = _BUCKET_FORMATS[bucket]
+        sql = f"""
+            WITH bucketed AS (
+                SELECT strftime(?, {time_col}) AS bucket,
+                       {bucket_agg}({value_expr}) AS value,
+                       COUNT(*) AS n
+                FROM {table}
+                {where_clause}
+                GROUP BY bucket
+            )
+            SELECT bucket, value, n,
+                   AVG(value) OVER (
+                       ORDER BY bucket
+                       ROWS BETWEEN {w} PRECEDING AND CURRENT ROW
+                   ) AS moving_avg
+            FROM bucketed
+            ORDER BY bucket;
+        """
+        params = (fmt, *where_params)
+
+    with get_connection() as conn:
+        rows = conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_ratings_timeseries(
+    type: str = "overall",
+    bucket: str = "raw",
+    window: int = 5,
+) -> list[dict]:
+    return _timeseries(
+        table="duels_ranking_poll",
+        value_expr="rating",
+        time_col="timestamp",
+        sort_col="id",
+        where_sql="type = ?",
+        where_params=(type,),
+        bucket=bucket,
+        window=window,
+    )
+
+
+def get_singleplayer_timeseries(
+    bucket: str = "raw",
+    window: int = 5,
+    mode: str | None = None,
+) -> list[dict]:
+    where_sql = ""
+    where_params: tuple = ()
+    if mode is not None:
+        where_sql = "mode = ?"
+        where_params = (mode,)
+    return _timeseries(
+        table="singleplayer_games",
+        value_expr="points",
+        time_col="timestamp",
+        sort_col="timestamp",
+        where_sql=where_sql,
+        where_params=where_params,
+        bucket=bucket,
+        window=window,
+    )
+
+
+def get_duels_timeseries(
+    bucket: str = "day",
+    window: int = 5,
+) -> list[dict]:
+    # value = winrate (0..1); for bucket=raw each row is 0 or 1 and the
+    # rolling avg is the trailing winrate over the last `window` duels.
+    return _timeseries(
+        table="duels",
+        value_expr="i_won",
+        time_col="time",
+        sort_col="time",
+        bucket=bucket,
+        window=window,
+    )
 
 
 # ---------- stats ----------
