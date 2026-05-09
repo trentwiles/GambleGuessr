@@ -225,4 +225,6 @@ def getDuelsHistory(pagination=None, activity=None):
 
     return activity
 
-print(getDuelsHistory())
+
+if __name__ == "__main__":
+    print(getDuelsHistory())

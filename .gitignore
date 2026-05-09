@@ -6,3 +6,6 @@ venv/
 
 # database, and .db-wal files
 *.db*
+
+# logs
+*.log*
