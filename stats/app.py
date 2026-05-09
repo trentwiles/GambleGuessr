@@ -56,17 +56,20 @@ def getRating():
         "overall": api["rating"],
         "standardDuel": api["gameModeRatings"]["standardDuels"]["rating"],
         "noMoveDuel": api["gameModeRatings"]["noMoveDuels"]["rating"],
-        "timestamp": time.now()
+        "timestamp": int(time.time())
     }
 
 # grabs the moving average of the last 5, 10, and 20 games
-def getMovingAverages(pagination=None, activity=[]):
-    hit_url = f"{API_BASE}/v4/feed/private",
-    if pagination != None:
-        hit_url = f"{hit_url}?paginationToken={pagination}" 
+def getMovingAverages(pagination=None, activity=None):
+    if activity is None:
+        activity = []
+
+    hit_url = f"{API_BASE}/v4/feed/private"
+    if pagination is not None:
+        hit_url = f"{hit_url}?paginationToken={pagination}"
 
     r = requests.get(
-        f"{API_BASE}/v4/feed/private",
+        hit_url,
         headers={"User-Agent": USER_AGENT},
         cookies={"_ncfa": os.getenv("GEO_NCFA")}
     )
@@ -181,13 +184,16 @@ def getDuelMetadata(game_id: str):
         "rounds": rounds,
     }
 
-def getDuelsHistory(pagination=None, activity=[]):
-    hit_url = f"{API_BASE}/v4/feed/private",
-    if pagination != None:
-        hit_url = f"{hit_url}?paginationToken={pagination}" 
+def getDuelsHistory(pagination=None, activity=None):
+    if activity is None:
+        activity = []
+
+    hit_url = f"{API_BASE}/v4/feed/private"
+    if pagination is not None:
+        hit_url = f"{hit_url}?paginationToken={pagination}"
 
     r = requests.get(
-        f"{API_BASE}/v4/feed/private",
+        hit_url,
         headers={"User-Agent": USER_AGENT},
         cookies={"_ncfa": os.getenv("GEO_NCFA")}
     )
